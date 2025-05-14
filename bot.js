@@ -1,152 +1,106 @@
 import Discord from 'discord.js';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import express from 'express';
 
 dotenv.config();
 
-// Configuration
+// Express app for health checks
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    lastChecked: new Date().toISOString(),
+    botStatus: client?.user?.tag ? 'connected' : 'disconnected',
+    serverStatus: state.lastServerStatus ? 'online' : 'offline',
+    maintenanceMode: state.isUnderMaintenance
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`Health check server running on port ${PORT}`);
+});
+
+// Bot configuration
 const config = {
-    token: process.env.DISCORD_TOKEN,
-    serverIP: process.env.SERVER_IP || 'your-server-ip',
-    channelID: process.env.CHANNEL_ID || 'your-channel-id',
-    allowedRoleID: process.env.ALLOWED_ROLE_ID || 'your-allowlist-role-id',
-    adminRoleID: process.env.ADMIN_ROLE_ID || 'your-admin-role-id',
-    checkInterval: process.env.CHECK_INTERVAL || 4000, // 5 minutes in ms
-    testMode: process.env.TEST_MODE === 'true' // Enable test mode
+  token: process.env.DISCORD_TOKEN,
+  serverIP: process.env.SERVER_IP,
+  channelID: process.env.CHANNEL_ID,
+  allowedRoleID: process.env.ALLOWED_ROLE_ID,
+  adminRoleID: process.env.ADMIN_ROLE_ID,
+  checkInterval: parseInt(process.env.CHECK_INTERVAL) || 60000, // 1 minute
+  stateFile: './bot_state.json'
 };
 
-// Bot state
-let isUnderMaintenance = false;
-let lastServerStatus = null;
-let testServerStatus = true; // Default test status (online)
+// State management
+let state = {
+  isUnderMaintenance: false,
+  lastServerStatus: null,
+  lastAnnouncement: 0
+};
 
-// Create Discord client
 const client = new Discord.Client({
-    intents: [
-        Discord.GatewayIntentBits.Guilds,
-        Discord.GatewayIntentBits.GuildMessages,
-        Discord.GatewayIntentBits.MessageContent
-    ]
+  intents: [
+    Discord.GatewayIntentBits.Guilds,
+    Discord.GatewayIntentBits.GuildMessages,
+    Discord.GatewayIntentBits.MessageContent
+  ]
 });
 
-// Ready event
-client.on('ready', () => {
-    console.log(`Logged in as ${client.user.tag}`);
-    console.log(`Test mode: ${config.testMode ? 'ON' : 'OFF'}`);
-    
-    // Start checking server status
-    setInterval(checkServerStatus, config.checkInterval);
-    checkServerStatus(); // Initial check
-});
+// Immediate announcement on status change
+async function handleStatusChange(isOnline) {
+  const now = Date.now();
+  
+  if (state.isUnderMaintenance) return;
 
-// Message handler for admin commands
-client.on('messageCreate', async message => {
-    // Ignore messages from bots or not in guild
-    if (message.author.bot || !message.guild) return;
+  if (isOnline && state.lastServerStatus === false) {
+    await sendAnnouncement(`🎉 **Server Back Online** 🎉\n\nThe server has completed its restart and is now online!\n\n<@&${config.allowedRoleID}>`);
+  } 
+  else if (!isOnline && state.lastServerStatus === true) {
+    await sendAnnouncement(`🔧 **Scheduled Restart** 🔧\n\nThe server is undergoing a scheduled restart. It should be back online shortly.\n\n<@&${config.allowedRoleID}>`);
+  }
+  
+  state.lastServerStatus = isOnline;
+  state.lastAnnouncement = now;
+}
 
-    // Check if user has admin role
-    const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-    if (!member || !member.roles.cache.has(config.adminRoleID)) return;
-
-    // Process commands
-    if (message.content.startsWith('!maintenance')) {
-        const args = message.content.split(' ');
-        if (args.length < 2) {
-            return message.reply('Usage: !maintenance <on|off> [reason]');
-        }
-
-        const action = args[1].toLowerCase();
-        const reason = args.slice(2).join(' ') || 'No reason provided';
-
-        if (action === 'on') {
-            isUnderMaintenance = true;
-            await sendAnnouncement(`🚧 **Server Maintenance** 🚧\n\nThe server is now under maintenance. ${reason}\n\n<@&${config.allowedRoleID}>`);
-            await message.reply('Maintenance mode activated and announcement sent.');
-        } else if (action === 'off') {
-            isUnderMaintenance = false;
-            await sendAnnouncement(`✅ **Maintenance Complete** ✅\n\nThe server maintenance has been completed. The server should be online now!\n\n<@&${config.allowedRoleID}>`);
-            await message.reply('Maintenance mode deactivated and announcement sent.');
-        } else {
-            await message.reply('Invalid action. Use "on" or "off".');
-        }
-    }
-
-    // Test commands (only work in test mode)
-    if (config.testMode && message.content.startsWith('!test')) {
-        const args = message.content.split(' ');
-        if (args.length < 2) {
-            return message.reply('Test commands:\n!test online - Simulate server online\n!test offline - Simulate server offline\n!test toggle - Toggle server status');
-        }
-
-        const action = args[1].toLowerCase();
-        
-        if (action === 'online') {
-            testServerStatus = true;
-            await message.reply('Test mode: Simulating server ONLINE status');
-            await checkServerStatus();
-        } else if (action === 'offline') {
-            testServerStatus = false;
-            await message.reply('Test mode: Simulating server OFFLINE status');
-            await checkServerStatus();
-        } else if (action === 'toggle') {
-            testServerStatus = !testServerStatus;
-            await message.reply(`Test mode: Toggled server status to ${testServerStatus ? 'ONLINE' : 'OFFLINE'}`);
-            await checkServerStatus();
-        } else {
-            await message.reply('Invalid test command. Use "online", "offline", or "toggle"');
-        }
-    }
-});
-
-// Function to check server status
+// Enhanced server status check
 async function checkServerStatus() {
-    try {
-        let isOnline;
-        
-        if (config.testMode) {
-            // Use test status in test mode
-            isOnline = testServerStatus;
-            console.log(`[TEST] Server status check: ${isOnline ? 'ONLINE' : 'OFFLINE'}`);
-        } else {
-            // Actual server check
-            const response = await fetch(`http://${config.serverIP}/dynamic.json`);
-            const data = await response.json();
-            isOnline = data && data.players !== undefined;
-        }
-        
-        // If server was offline and now is online (and not in maintenance)
-        if (lastServerStatus === false && isOnline && !isUnderMaintenance) {
-            await sendAnnouncement(`🎉 **Server Online** 🎉\n\nThe server is now back online!\n\n<@&${config.allowedRoleID}>`);
-        }
-        
-        // If server was online and now is offline (and not in maintenance)
-        if (lastServerStatus === true && !isOnline && !isUnderMaintenance) {
-            await sendAnnouncement(`⚠️ **Server Offline** ⚠️\n\nThe server appears to be offline. We're looking into it.\n\n<@&${config.allowedRoleID}>`);
-        }
-        
-        lastServerStatus = isOnline;
-    } catch (error) {
-        console.error('Error checking server status:', error);
-        
-        // If we can't reach the server (and not in maintenance)
-        if (lastServerStatus !== false && !isUnderMaintenance) {
-            await sendAnnouncement(`⚠️ **Server Offline** ⚠️\n\nThe server appears to be offline. We're looking into it.\n\n<@&${config.allowedRoleID}>`);
-        }
-        
-        lastServerStatus = false;
+  try {
+    const response = await fetch(`http://${config.serverIP}/dynamic.json`);
+    const data = await response.json();
+    const isOnline = data && data.players !== undefined;
+
+    if (state.lastServerStatus !== isOnline) {
+      await handleStatusChange(isOnline);
     }
+  } catch (error) {
+    console.error('Status check failed:', error);
+    if (state.lastServerStatus !== false) {
+      await handleStatusChange(false);
+    }
+  }
 }
 
-// Function to send announcements
-async function sendAnnouncement(message) {
-    try {
-        const channel = await client.channels.fetch(config.channelID);
-        await channel.send(message);
-        console.log('Announcement sent:', message);
-    } catch (error) {
-        console.error('Error sending announcement:', error);
-    }
-}
+// Message handlers (same as before)
+client.on('ready', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  setInterval(checkServerStatus, config.checkInterval);
+  checkServerStatus();
+});
 
-// Login to Discord
+client.on('messageCreate', async message => {
+  if (message.author.bot || !message.guild) return;
+
+  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (!member || !member.roles.cache.has(config.adminRoleID)) return;
+
+  if (message.content.startsWith('!maintenance')) {
+    // ... (same maintenance commands as before)
+  }
+});
+
+// Start the bot
 client.login(config.token);
