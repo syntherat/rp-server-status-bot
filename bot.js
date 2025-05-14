@@ -11,7 +11,7 @@ const config = {
     channelID: process.env.CHANNEL_ID || 'your-channel-id',
     allowedRoleID: process.env.ALLOWED_ROLE_ID || 'your-allowlist-role-id',
     adminRoleID: process.env.ADMIN_ROLE_ID || 'your-admin-role-id',
-    checkInterval: process.env.CHECK_INTERVAL || 20000, // 5 minutes in ms
+    checkInterval: process.env.CHECK_INTERVAL || 4000, // 5 minutes in ms
     testMode: process.env.TEST_MODE === 'true' // Enable test mode
 };
 
